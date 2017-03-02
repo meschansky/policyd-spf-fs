@@ -52,6 +52,12 @@ Override SPF records for domains
 .TP
 .B \-\-fallback <...>
 Fallback SPF records for domains
+.B \-\-add-header-only
+Do not instruct postfix to reject messages on any failures and errors. Add only a header containing
+the results of SPF check. This mode is DMARC-compatible, where DMARC policy is applied to SPF and DKIM results
+to make a final verdict.
+.B \-\-auth-results
+Use header Authentication-Results instead of default Received-SPF
 
 .SH SEE ALSO
 .BR

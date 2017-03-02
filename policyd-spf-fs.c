@@ -2,6 +2,7 @@
  * policyd-spf-fs - SPF Policy Deamon for Postfix
  *
  *  Author: Matthias Cramer <cramer@freestone.net>
+ *  Modified: Michael Meschansky: https://github.com/meschansky
  *
  * $Id: policyd-spf-fs.c 27 2007-09-11 11:06:29Z cramer $
  *
@@ -79,6 +80,7 @@ extern int h_errno;    /* for netdb */
 
 #define REQUEST_LIMIT 100
 #define RESULTSIZE      1024
+#define MAX_HEADER_PREFIX_LEN 512
 
 #define POSTFIX_DUNNO   "DUNNO"
 #define POSTFIX_REJECT  "REJECT"
@@ -152,6 +154,8 @@ static struct option long_options[] = {
 	{"name", 1, 0, 'n'},
 	{"override", 1, 0, 'a'},
 	{"fallback", 1, 0, 'z'},
+	{"add-header-only", 1, 0, 'o'},
+	{"auth-results", 1, 0, 'A'},
 
 	{"keep-comments", 0, 0, 'k'},
 	{"version", 0, 0, 'v'},
@@ -188,20 +192,22 @@ help()
 	"policyd-spf-fs [options] ...\n"
 	"\n"
 	"Valid options are:\n"
-	"	--debug [debug level]	   debug level.\n"
+	"	--debug [debug level]	    debug level.\n"
 	"	--local <SPF mechanisms>	Local policy for whitelisting.\n"
-	"	--trusted <0|1>			 Should trusted-forwarder.org be checked?\n"
+	"	--trusted <0|1>			    Should trusted-forwarder.org be checked?\n"
 	"	--guess <SPF mechanisms>	Default checks if no SPF record is found.\n"
 	"	--default-explanation <str> Default explanation string to use.\n"
-	"	--max-lookup <number>	   Maximum number of DNS lookups to allow\n"
+	"	--max-lookup <number>	    Maximum number of DNS lookups to allow\n"
 	"	--sanitize <0|1>			Clean up invalid characters in output?\n"
 	"	--name <domain name>		The name of the system doing the SPF\n"
-	"							   checking\n"
-	"	--override <...>			Override SPF records for domains\n"
-	"	--fallback <...>			Fallback SPF records for domains\n"
+	"							        checking,\n"
+	"	--override <...>			Override SPF records for domains.\n"
+	"	--fallback <...>			Fallback SPF records for domains.\n"
+	"	--add-header-only           Do not reject any messages. Only add a header with results. DMARC-compatible mode.\n"
 	"\n"
-	"	--version				   Print version of spfquery.\n"
-	"	--help					  Print out these options.\n"
+	"	--auth-results              Use Authentication-Results header instead of Received-SPF.\n"
+	"	--version				    Print version of spfquery.\n"
+	"	--help					    Print out these options.\n"
 	"\n"
 	);
 }
@@ -272,6 +278,8 @@ struct SPF_client_options_struct {
 	int			 max_lookup;
 	int			 sanitize;
 	int			 debug;
+	int          add_header_only;
+	int          use_auth_results;
 } SPF_client_options_t;
 
 typedef
@@ -319,7 +327,7 @@ static char read_request_from_pf(SPF_client_options_t *opts, SPF_client_request_
                                         continue;
                                 }
                                 break;
-			case 'r':
+			            case 'r':
                                 if (strncasecmp(line, "recipient=", 10) == 0) {
                                         req->rcpt_to = strdup(&line[10]);
                                         if (opts->debug > 1) syslog(LOG_DEBUG, "[recipient %s]", req->rcpt_to); /* DBG */
@@ -337,43 +345,68 @@ static char read_request_from_pf(SPF_client_options_t *opts, SPF_client_request_
         }
 }
 
-static void pf_response(SPF_client_options_t    *opts, SPF_response_t *spf_response, SPF_client_request_t *req)
+static void pf_response(SPF_client_options_t    *opts, SPF_response_t *spf_response, SPF_client_request_t *req, char *header_prefix)
 {
       char                     result[RESULTSIZE];
       char                     spf_comment[RESULTSIZE];
+      char                     err_comment[RESULTSIZE];
 
+      err_comment[0] = '\0';
+
+      //spf_response->result = SPF_RESULT_INVALID;
       switch (spf_response->result) {
                 case SPF_RESULT_PASS:
                         strcpy(result, POSTFIX_DUNNO);
-                        printf("action=PREPEND X-%s\n",SPF_response_get_received_spf(spf_response));
-                        snprintf(spf_comment, RESULTSIZE, SPF_response_get_received_spf(spf_response));
+                        printf("action=PREPEND %s%s\n", header_prefix, SPF_response_get_received_spf_value(spf_response));
+                        snprintf(spf_comment, RESULTSIZE, "%s", SPF_response_get_received_spf_value(spf_response));
                         break;
                 case SPF_RESULT_FAIL:
-                	strcpy(result, POSTFIX_REJECT);
-                        snprintf(spf_comment, RESULTSIZE,"SPF Reject: %s",
-                                                        (spf_response->smtp_comment
-                                                                ? spf_response->smtp_comment
-                                                                : (spf_response->header_comment
-                                                                        ? spf_response->header_comment
-                                                                        : "")));
+                        if(opts->add_header_only)
+                        {
+                            strcpy(result, POSTFIX_DUNNO);
+                            printf("action=PREPEND %s%s\n", header_prefix, SPF_response_get_received_spf_value(spf_response));
+                        }
+                        else {
+                            strcpy(result, POSTFIX_REJECT);
+                            snprintf(spf_comment, RESULTSIZE,"SPF Reject: %s",
+                                                            (spf_response->smtp_comment
+                                                                    ? spf_response->smtp_comment
+                                                                    : (spf_response->header_comment
+                                                                            ? spf_response->header_comment
+                                                                            : "")));
+                            }
                         break;
                 case SPF_RESULT_TEMPERROR:
+                        strcpy(err_comment, "temperror");
                 case SPF_RESULT_PERMERROR:
+                        strcpy(err_comment, "permerror");
                 case SPF_RESULT_INVALID:
-                        snprintf(result, RESULTSIZE,
-                                                        "450 temporary failure: %s",
-                                                        (spf_response->smtp_comment
-                                                                ? spf_response->smtp_comment
-                                                                : ""));
-			spf_comment[0]='\0';
+                        if(!err_comment[0])
+                            strcpy(err_comment, "invalid");
+                        if(opts->add_header_only)
+                        {
+                            strcpy(result, POSTFIX_DUNNO);
+                            printf("action=PREPEND X-SPF-Received: %s (%s)\n",
+                                    err_comment,
+                                    (spf_response->smtp_comment ? spf_response->smtp_comment : "")
+                                  );
+                        }
+                        else {
+                            snprintf(result, RESULTSIZE,
+                                                            "450 temporary failure: %s",
+                                                            (spf_response->smtp_comment
+                                                                    ? spf_response->smtp_comment
+                                                                    : ""));
+                            spf_comment[0]='\0';
+			            }
                         break;
                 case SPF_RESULT_SOFTFAIL:
                 case SPF_RESULT_NEUTRAL: 
                 case SPF_RESULT_NONE:    
                 default:
                         strcpy(result, POSTFIX_DUNNO);
-                        printf("action=PREPEND X-%s\n",SPF_response_get_received_spf(spf_response));
-                        snprintf(spf_comment, RESULTSIZE, SPF_response_get_received_spf(spf_response));
+                        printf("action=PREPEND %s%s\n", header_prefix, SPF_response_get_received_spf_value(spf_response));
+                        snprintf(spf_comment, RESULTSIZE, "%s", SPF_response_get_received_spf_value(spf_response));
                         break;
         }
         
@@ -381,7 +414,8 @@ static void pf_response(SPF_client_options_t    *opts, SPF_response_t *spf_respo
 	if (opts->debug > 1)
 		syslog(LOG_DEBUG, "<-- action=%s\n", result);
 	if (strcmp(result,POSTFIX_REJECT) == 0) {
-          printf("action=%s %s\n\n", result, spf_comment);
+        if(!opts->add_header_only)
+            printf("action=%s %s\n\n", result, spf_comment);
         } else {
           printf("action=%s\n\n", result);
         }
@@ -402,7 +436,6 @@ int main( int argc, char *argv[] )
 	SPF_response_t	*spf_response_2mx = NULL;
 	SPF_errcode_t	 err;
 
-	int  			 opt_keep_comments = 0;
 
 #ifdef TO_MX
 	char			*p, *p_end;
@@ -419,6 +452,7 @@ int main( int argc, char *argv[] )
 	int				 result_len = 0;
 	char			hostname[255];
 	char			pf_result[100];
+	char			header_prefix[MAX_HEADER_PREFIX_LEN];
 	struct hostent		*fullhostname;
 
         /* Figure out our name */
@@ -447,7 +481,7 @@ int main( int argc, char *argv[] )
 	for (;;) {
 		int option_index;	/* Largely unused */
 
-		c = getopt_long_only (argc, argv, "f:i:s:h:r:lt::gemcnd::kz:a:v",
+		c = getopt_long_only (argc, argv, "f:i:s:h:r:lt::gemcnd::kz:a:voA",
 				  long_options, &option_index);
 
 		if (c == -1)
@@ -485,6 +519,14 @@ int main( int argc, char *argv[] )
 				opts->rec_dom = optarg;
 				break;
 
+			case 'o':
+				opts->add_header_only = 1;
+				break;
+
+			case 'A':
+				opts->use_auth_results = 1;
+				break;
+
 			case 'a':
 				unimplemented('a');
 				break;
@@ -516,7 +558,6 @@ int main( int argc, char *argv[] )
 				break;
 
 			case 'k':
-				opt_keep_comments = 1;
 				break;
 
 			case 'd':
@@ -596,7 +637,7 @@ int main( int argc, char *argv[] )
   		}
 		req = (SPF_client_request_t *)malloc(sizeof(SPF_client_request_t));
 		memset(req, 0, sizeof(SPF_client_request_t));
-		
+
 		if (read_request_from_pf(opts, req)) {
 		  syslog(LOG_WARNING, "IO Closed while reading, exiting");
 		  EXIT_OK;
@@ -648,7 +689,7 @@ int main( int argc, char *argv[] )
 			result[0] = '\0';
 		APPEND_RESULT(SPF_response_result(spf_response));
 		
-#ifdef TO_MX /* This code returns usualy neutral and oferwrites a fail from the above spf code
+#ifdef TO_MX /* This code returns usualy neutral and overwrites a fail from the above spf code
                 which is not what we like. So we disable it for the time deing ... */
                 
 		if (req->rcpt_to != NULL  && *req->rcpt_to != '\0' ) {
@@ -702,15 +743,12 @@ int main( int argc, char *argv[] )
 			spf_response = SPF_response_combine(spf_response,
 							spf_response_2mx);
 		}
+		if(opts->use_auth_results)
+            snprintf(header_prefix, MAX_HEADER_PREFIX_LEN, "Authentication-results: %s; spf=", opts->rec_dom);
+        else
+            snprintf(header_prefix, MAX_HEADER_PREFIX_LEN, "Received-SPF: ");
 
-/*		printf( "R: %s\nSC: %s\nHC: %s\nRS: %s\n",
-			result,
-			X_OR_EMPTY(SPF_response_get_smtp_comment(spf_response)),
-			X_OR_EMPTY(SPF_response_get_header_comment(spf_response)),
-			X_OR_EMPTY(SPF_response_get_received_spf(spf_response))
-			);
-*/			
-		pf_response(opts, spf_response, req);
+		pf_response(opts, spf_response, req, header_prefix);
 			
 		res = SPF_response_result(spf_response);
 
