@@ -1,7 +1,7 @@
 # $Id: Makefile 24 2007-09-11 10:30:28Z cramer $
 
 PREFIX	?= /usr/local
-BIN     = $(DISTPATH)$(PREFIX)/bin
+BIN     = $(DISTPATH)$(PREFIX)/sbin
 MAN	= $(DISTPATH)$(PREFIX)/share/man/man1
 
 CC = gcc
@@ -20,7 +20,7 @@ LIBS = -lspf2 -lpthread -lnsl -lresolv
 all: policyd-spf-fs
 
 policyd-spf-fs: policyd-spf-fs.o Makefile
-	$(CC) $(CFLAGS) $(LIBS) policyd-spf-fs.o -o policyd-spf-fs
+	$(CC) $(CFLAGS) policyd-spf-fs.o -o policyd-spf-fs $(LIBS)
 
 install: policyd-spf-fs policyd-spf-fs.1
 	strip policyd-spf-fs
