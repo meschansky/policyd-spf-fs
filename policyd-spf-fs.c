@@ -113,6 +113,22 @@ extern int h_errno;    /* for netdb */
 	continue; \
 }
 
+#define REPLY_ERROR  \
+    snprintf(err_descr, BUFSIZ, "%s", response_get_errors_description(NULL, spf_response)); \
+    if(opts->add_header_only) \
+    { \
+        strcpy(result, POSTFIX_DUNNO); \
+        printf("action=PREPEND %s%s (%s)\n",  header_prefix, err_string, \
+                (err_descr[0] ? err_descr : "") \
+              ); \
+        response_print_errors(NULL, spf_response, \
+                SPF_response_errcode(spf_response)); \
+    } \
+    else { \
+        snprintf(result, RESULTSIZE, "450 temporary failure (%s): %s", err_string, (err_descr[0] ? err_descr : "")); \
+        spf_comment[0]='\0'; \
+    }
+
 #define WARN_ERROR do { res = 255; } while(0)
 #define FAIL_ERROR do { res = 255; goto error; } while(0)
 #define EXIT_OK do { res = 0; goto error; } while(0)
@@ -249,6 +265,31 @@ response_print_errors(const char *context,
 	syslog(LOG_CRIT,"EndError\n");
 }
 
+const char *
+response_get_errors_description(const char *context,
+				SPF_response_t *spf_response)
+{
+	SPF_error_t		*spf_error;
+	int err;
+
+	if (spf_response != NULL) {
+		err = SPF_response_errcode(spf_response);
+
+		if(SPF_response_messages(spf_response) > 0) {
+			spf_error = SPF_response_message(spf_response, 0);
+			return		SPF_error_errorp(spf_error) ? "Error" : "Warning",
+					((SPF_error_errorp(spf_error) && (!err))
+							? "[UNRETURNED] "
+							: ""),
+					SPF_error_message(spf_error);
+		}
+	}
+	else {
+		syslog(LOG_CRIT,"libspf2 gave a NULL spf_response\n");
+	}
+	return "";
+}
+
 static void
 response_print(const char *context, SPF_response_t *spf_response)
 {
@@ -352,9 +393,11 @@ static void pf_response(SPF_client_options_t    *opts, SPF_response_t *spf_respo
 {
       char                     result[RESULTSIZE];
       char                     spf_comment[RESULTSIZE];
-      char                     err_comment[RESULTSIZE];
+      char                     err_string[RESULTSIZE];
+      char                     err_descr[BUFSIZ];
 
-      err_comment[0] = '\0';
+      err_string[0] = '\0';
+      err_descr[0] = '\0';
 
       //spf_response->result = SPF_RESULT_INVALID;
       switch (spf_response->result) {
@@ -380,36 +423,32 @@ static void pf_response(SPF_client_options_t    *opts, SPF_response_t *spf_respo
                             }
                         break;
                 case SPF_RESULT_TEMPERROR:
-                        strcpy(err_comment, "temperror");
+                        strcpy(err_string, "temperror");
+                        REPLY_ERROR
+                        break;
                 case SPF_RESULT_PERMERROR:
-                        strcpy(err_comment, "permerror");
+                        strcpy(err_string, "permerror");
+                        REPLY_ERROR
+                        break;
                 case SPF_RESULT_INVALID:
-                        if(!err_comment[0])
-                            strcpy(err_comment, "invalid");
-                        if(opts->add_header_only)
-                        {
-                            strcpy(result, POSTFIX_DUNNO);
-                            printf("action=PREPEND %s%s (%s)\n",
-                                    header_prefix,
-                                    err_comment,
-                                    (spf_response->smtp_comment ? spf_response->smtp_comment : "")
-                                  );
-                        }
-                        else {
-                            snprintf(result, RESULTSIZE,
-                                                            "450 temporary failure: %s",
-                                                            (spf_response->smtp_comment
-                                                                    ? spf_response->smtp_comment
-                                                                    : ""));
-                            spf_comment[0]='\0';
-			            }
+                        strcpy(err_string, "invalid");
+                        REPLY_ERROR
                         break;
                 case SPF_RESULT_SOFTFAIL:
-                case SPF_RESULT_NEUTRAL: 
-                case SPF_RESULT_NONE:    
+                        strcpy(err_string, "softfail");
+                        REPLY_ERROR
+                        break;
+                case SPF_RESULT_NEUTRAL:
+                        strcpy(err_string, "neutral");
+                        strcpy(result, POSTFIX_DUNNO);
+                        break;
+                case SPF_RESULT_NONE:
+                        printf("action=PREPEND %snone (%s)\n", header_prefix, response_get_errors_description(NULL, spf_response));
+                        strcpy(result, POSTFIX_DUNNO);
+                        break;
                 default:
                         strcpy(result, POSTFIX_DUNNO);
-                        printf("action=PREPEND %s%s\n", header_prefix, SPF_response_get_received_spf_value(spf_response));
+                        printf("action=PREPEND %s%snone res=%d\n", header_prefix, SPF_response_get_received_spf_value(spf_response), spf_response->result);
                         snprintf(spf_comment, RESULTSIZE, "%s", SPF_response_get_received_spf_value(spf_response));
                         break;
         }
@@ -690,15 +729,16 @@ int main( int argc, char *argv[] )
 		  if (opts->debug > 1)
 			response_print_errors("Failed to query MAIL-FROM",
 							spf_response, err);
-
-			CONTINUE_DUNNO("none; no SPF record found");
+            /* disabling the next line and processing it in pf_response()
+			CONTINUE_DUNNO(snprintf("none; (%s)", response_get_errors_description(NULL, spf_response)));
+			*/
 		}
 
 		if (result != NULL)
 			result[0] = '\0';
 		APPEND_RESULT(SPF_response_result(spf_response));
 		
-#ifdef TO_MX /* This code returns usualy neutral and overwrites a fail from the above spf code
+#ifdef TO_MX /* This code returns usually neutral and overwrites a fail from the above spf code
                 which is not what we like. So we disable it for the time deing ... */
                 
 		if (req->rcpt_to != NULL  && *req->rcpt_to != '\0' ) {
@@ -737,7 +777,7 @@ int main( int argc, char *argv[] )
 		/* We now have an option to call SPF_request_query_fallback */
 		if (opts->fallback) {
 			err = SPF_request_query_fallback(spf_request,
-							&spf_response, opts->fallback);
+							&spf_response_2mx, opts->fallback);
 			if (opts->debug > 1)
 				response_print("fallback query", spf_response_2mx);
 			if (err) {
@@ -752,7 +792,7 @@ int main( int argc, char *argv[] )
 			spf_response = SPF_response_combine(spf_response,
 							spf_response_2mx);
 		}
-
+        /* main processing of the response */
 		pf_response(opts, spf_response, req, header_prefix);
 			
 		res = SPF_response_result(spf_response);

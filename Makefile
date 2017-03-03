@@ -34,4 +34,3 @@ install_restart:
 
 clean:
 	rm -f *~ *.o policyd-spf-fs
-	
