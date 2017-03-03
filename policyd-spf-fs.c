@@ -93,7 +93,10 @@ extern int h_errno;    /* for netdb */
 
 #define CONTINUE_ERROR { \
 	res = 255; \
-	sprintf(pf_result, "450 temporary failure: please contact postmaster if the error remains"); \
+	if(opts->add_header_only) \
+		sprintf(pf_result, "PREPEND %s%s", header_prefix, "temperror"); \
+    else \
+	    sprintf(pf_result, "450 temporary failure: please contact postmaster if the error remains"); \
 	printf("action=%s\n\n", pf_result); \
 	fflush(stdout); \
 	if (opts->debug) \
@@ -102,7 +105,7 @@ extern int h_errno;    /* for netdb */
 }
 
 #define CONTINUE_DUNNO(s) { \
-	printf("action=PREPEND X-Received-SPF: %s\n", s); \
+	printf("action=PREPEND %s%s\n", header_prefix, s); \
 	printf("action=%s\n\n", POSTFIX_DUNNO); \
 	fflush(stdout); res=255; \
 	if (opts->debug) \
@@ -386,7 +389,8 @@ static void pf_response(SPF_client_options_t    *opts, SPF_response_t *spf_respo
                         if(opts->add_header_only)
                         {
                             strcpy(result, POSTFIX_DUNNO);
-                            printf("action=PREPEND X-SPF-Received: %s (%s)\n",
+                            printf("action=PREPEND %s%s (%s)\n",
+                                    header_prefix,
                                     err_comment,
                                     (spf_response->smtp_comment ? spf_response->smtp_comment : "")
                                   );
@@ -615,7 +619,12 @@ int main( int argc, char *argv[] )
 	if ( !opts->explanation ) {
 	  opts->explanation = DEFAULT_EXPLANATION;
 	}
-	
+
+    if(opts->use_auth_results)
+        snprintf(header_prefix, MAX_HEADER_PREFIX_LEN, "Authentication-results: %s; spf=", opts->rec_dom);
+    else
+        snprintf(header_prefix, MAX_HEADER_PREFIX_LEN, "Received-SPF: ");
+
 	err = SPF_server_set_explanation( spf_server, opts->explanation, &spf_response );
 	if ( err ) {
 	  response_print_errors("Error setting default explanation",
@@ -682,7 +691,7 @@ int main( int argc, char *argv[] )
 			response_print_errors("Failed to query MAIL-FROM",
 							spf_response, err);
 
-			CONTINUE_DUNNO("no SPF record found");
+			CONTINUE_DUNNO("none; no SPF record found");
 		}
 
 		if (result != NULL)
@@ -743,10 +752,6 @@ int main( int argc, char *argv[] )
 			spf_response = SPF_response_combine(spf_response,
 							spf_response_2mx);
 		}
-		if(opts->use_auth_results)
-            snprintf(header_prefix, MAX_HEADER_PREFIX_LEN, "Authentication-results: %s; spf=", opts->rec_dom);
-        else
-            snprintf(header_prefix, MAX_HEADER_PREFIX_LEN, "Received-SPF: ");
 
 		pf_response(opts, spf_response, req, header_prefix);
 			
