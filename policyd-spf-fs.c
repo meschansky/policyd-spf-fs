@@ -621,7 +621,7 @@ int main( int argc, char *argv[] )
 	}
 
     if(opts->use_auth_results)
-        snprintf(header_prefix, MAX_HEADER_PREFIX_LEN, "Authentication-results: %s; spf=", opts->rec_dom);
+        snprintf(header_prefix, MAX_HEADER_PREFIX_LEN, "Authentication-Results: %s; spf=", opts->rec_dom);
     else
         snprintf(header_prefix, MAX_HEADER_PREFIX_LEN, "Received-SPF: ");
 
